@@ -5,10 +5,14 @@ import aiohttp, datetime, os, math
 import akshare as ak
 from tqdm import tqdm
 import pandas as pd
-from sanic import Sanic, Blueprint, response
+# from sanic import Sanic, Blueprint, response
 
+from fastapi import FastAPI
 
-api = Blueprint('xtdata', url_prefix='/quote/xtdata')
+api = FastAPI()
+# api = Blueprint('xtdata', url_prefix='/quote/xtdata')
+# api = Sanic("xtdata")
+
 
 @api.listener('before_server_start')
 async def before_server_start(app, loop):
@@ -223,10 +227,10 @@ async def sync_stock_kline(request):
         xtdata.download_history_data(code, period=period, start_time=start_time)
     return response.json({"status": 0}, ensure_ascii=False)
 
-if __name__ == '__main__':
-    app = Sanic(name='xtdata')
-    app.config.RESPONSE_TIMEOUT = 600000
-    app.config.REQUEST_TIMEOUT = 600000
-    app.config.KEEP_ALIVE_TIMEOUT = 600
-    app.blueprint(api)
-    app.run(host='0.0.0.0', port=7700, workers=1, auto_reload=True, debug=False)
+# if __name__ == '__main__':
+#     app = Sanic(name='xtdata')
+#     app.config.RESPONSE_TIMEOUT = 600000
+#     app.config.REQUEST_TIMEOUT = 600000
+#     app.config.KEEP_ALIVE_TIMEOUT = 600
+#     app.blueprint(api)
+#     app.run(host='0.0.0.0', port=7700, workers=1, auto_reload=True, debug=True)

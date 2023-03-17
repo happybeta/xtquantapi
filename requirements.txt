@@ -3,6 +3,7 @@ aiohttp
 akshare
 tqdm
 numpy
-sanic
+fastapi
+uvicorn
 pandas_ta
 pandas_market_calendars

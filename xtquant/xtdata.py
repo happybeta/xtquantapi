@@ -3,12 +3,15 @@
 取行情、财务等数据的相关接口
 """
 
-import sys, traceback
-from .IPythonApiClient import IPythonApiClient as RPCClient
-from .IPythonApiClient import get_local_data_field_list as getLocalDataFieldList
-from .IPythonApiClient import get_local_tick_data_batch as getLocalTickDataBatch
+import os, sys
+import time
+import traceback
 import json
-import os
+
+from . import xtbson as bson
+from . import xtdata_config
+
+from .IPythonApiClient import IPythonApiClient as RPCClient
 
 __all__ = [
     'subscribe_quote'
@@ -35,10 +38,15 @@ __all__ = [
     , 'remove_sector'
     , 'get_index_weight'
     , 'download_index_weight'
+    , 'get_holidays'
+    , 'get_trading_calendar'
+    , 'get_trade_times'
     #, 'get_industry'
     #, 'get_etf_info'
     #, 'get_main_contract'
     #, 'download_history_contracts'
+    , 'download_cb_data'
+    , 'get_cb_info'
 ]
 
 def try_except(func):
@@ -73,37 +81,112 @@ __rpc_init_status = rpc_init(__rpc_config)
 if __rpc_init_status < 0:
     print(f'rpc初始化失败，配置文件：{__rpc_config}')
 
+def load_global_config():
+    res = {}
+
+    base_path = os.path.join(os.environ["USERPROFILE"], ".xtquant")
+    if xtdata_config.client_guid:
+        full_path = os.path.join(base_path, xtdata_config.client_guid)
+        if os.path.isfile(os.path.join(full_path, "xtdata.cfg")):
+            config = json.load(open(os.path.join(full_path, "xtdata.cfg"), "r", encoding = "utf-8"))
+            res[config.get('port', 58610)] = config
+    else:
+        for file in os.listdir(base_path):
+            full_path = os.path.join(base_path, file)
+
+            try:
+                os.remove(os.path.join(full_path, "running_status"))
+            except PermissionError:
+                if os.path.isfile(os.path.join(full_path, "xtdata.cfg")):
+                    config = json.load(open(os.path.join(full_path, "xtdata.cfg"), "r", encoding = "utf-8"))
+                    res[config.get('port', 58610)] = config
+            except Exception as e:
+                pass
+    return res
+
 def get_client():
     global CLIENT
     if not CLIENT:
         CLIENT = RPCClient('client_xtdata', __xtdata_config)
-        if not CLIENT:
-            raise Exception("创建连接失败！")
+
+        try:
+            configs = load_global_config()
+            configs = sorted(configs.items(), key = lambda x:x[0])
+            for port, config in configs:
+                CLIENT.set_remote_addr('localhost', port)
+                CLIENT.reset()
+                succ, errmsg = CLIENT.connect_ex()
+                if succ:
+                    init_data_dir()
+                    break
+        except Exception as e:
+            pass
+
+        if not CLIENT.is_connected():
+            CLIENT.load_config(__xtdata_config)
+            CLIENT.reset()
+
     if not CLIENT.is_connected():
-        if not CLIENT.connect():
+        succ, errmsg = CLIENT.connect_ex()
+        if succ:
+            init_data_dir()
+        else:
             raise Exception("无法连接行情服务！")
     return CLIENT
 
+def reconnect(ip = 'localhost', port = None):
+    global CLIENT
+    CLIENT = None
+    if not CLIENT:
+        if port == None:
+            CLIENT = get_client()
+        else:
+            CLIENT = RPCClient('client_xtdata', __xtdata_config)
+            CLIENT.set_remote_addr(ip, port)
+            CLIENT.reset()
+            succ, errmsg = CLIENT.connect_ex()
+            if succ:
+                init_data_dir()
+
+    if not CLIENT.is_connected():
+        succ, errmsg = CLIENT.connect_ex()
+        if succ:
+            init_data_dir()
+        else:
+            raise Exception("无法连接行情服务！")
+    return
+
+default_data_dir = '../userdata_mini/datadir'
+data_dir = default_data_dir
+
 def init_data_dir():
+    global data_dir
+
     try:
         client = get_client()
-        data_dir = client.get_app_dir() + '/../userdata_mini/datadir'
+        data_dir = client.get_data_dir()
+
+        if data_dir == "":
+            data_dir = os.path.join(client.get_app_dir(), default_data_dir)
+
+        if data_dir != default_data_dir:
+            data_dir = os.path.abspath(data_dir)
     except Exception as e:
-        data_dir = '../userdata_mini/datadir'
-        print(f'本地数据路径：{data_dir}')
+        pass
+
     return data_dir
 
-data_dir = init_data_dir()
+debug_mode = 0
 
 def create_array(shape, dtype_tuple, capsule, size):
     import numpy as np
     import ctypes
-    
+
     ctypes.pythonapi.PyCapsule_GetPointer.restype = ctypes.POINTER(ctypes.c_char)
     ctypes.pythonapi.PyCapsule_GetPointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
     buff = ctypes.pythonapi.PyCapsule_GetPointer(capsule, None)
     base_type = size * buff._type_
-    
+
     for dim in shape[::-1]:
         base_type = dim * base_type
     p_arr_type = ctypes.POINTER(base_type)
@@ -111,8 +194,8 @@ def create_array(shape, dtype_tuple, capsule, size):
     obj._base = capsule
     return np.ndarray(shape = shape, dtype = np.dtype(dtype_tuple), buffer = obj)
 
-from .IPythonApiClient import get_np_tool
-get_np_tool().create_array = create_array
+from .IPythonApiClient import register_create_nparray
+register_create_nparray(create_array)
 
 def get_industry(industry_name):
     '''
@@ -163,12 +246,16 @@ def get_financial_data(stock_list, table_list=[], start_time='', end_time='', re
         'Balance' : 'ASHAREBALANCESHEET'
         , 'Income' : 'ASHAREINCOME'
         , 'CashFlow' : 'ASHARECASHFLOW'
-        #, 'Capital' : 'CAPITAL'
+        , 'Capital' : 'CAPITALSTRUCTURE'
+        , 'HolderNum' : 'SHAREHOLDER'
+        , 'Top10Holder' : 'TOP10HOLDER'
+        , 'Top10FlowHolder' : 'TOP10FLOWHOLDER'
+        , 'PershareIndex' : 'PERSHAREINDEX'
     }
-    
+
     if not table_list:
         table_list = list(all_table.keys())
-    
+
     all_table_upper = {table.upper() : all_table[table] for table in all_table}
     req_list = []
     names = {}
@@ -176,14 +263,28 @@ def get_financial_data(stock_list, table_list=[], start_time='', end_time='', re
         req_table = all_table_upper.get(table.upper(), table)
         req_list.append(req_table)
         names[req_table] = table
-    data = client.get_financial_data(stock_list, req_list, start_time, end_time, report_type)
-    
+
+    data = {}
+    sl_len = 20
+    stock_list2 = [stock_list[i : i + sl_len] for i in range(0, len(stock_list), sl_len)]
+    for sl in stock_list2:
+        data2 = client.get_financial_data(sl, req_list, start_time, end_time, report_type)
+        for s in data2:
+            data[s] = data2[s]
+
     import time
-    def conv_date(data, key):
+    import math
+    def conv_date(data, key, key2):
         if key in data:
-            data[key] = time.strftime('%Y%m%d', time.localtime(data[key] / 1000))
+            tmp_data = data[key]
+            if math.isnan(tmp_data):
+                if key2 not in data or math.isnan(data[key2]):
+                    data[key] = ''
+                else:
+                    tmp_data = data[key2]
+            data[key] = time.strftime('%Y%m%d', time.localtime(tmp_data / 1000))
         return
-    
+
     result = {}
     import pandas as pd
     for stock in data:
@@ -192,14 +293,30 @@ def get_financial_data(stock_list, table_list=[], start_time='', end_time='', re
         for table in stock_data:
             table_data = stock_data[table]
             for row_data in table_data:
-                conv_date(row_data, 'm_timetag')
-                conv_date(row_data, 'm_anntime')
+                conv_date(row_data, 'm_anntime', 'm_timetag')
+                conv_date(row_data, 'm_timetag', '')
+                conv_date(row_data, 'declareDate', '')
+                conv_date(row_data, 'endDate', '')
             result[stock][names[table]] = pd.DataFrame(table_data)
     return result
 
 
-def get_market_data(field_list=[], stock_list=[], period='1d', start_time='', end_time='', count=-1,
-                    dividend_type='none', fill_data=True):
+def get_market_data_ori(
+    field_list = [], stock_list = [], period = '1d'
+    , start_time = '', end_time = '', count = -1
+    , dividend_type = 'none', fill_data = True
+):
+    client = get_client()
+    enable_read_from_local = period in {'1m', '5m', '15m', '30m', '1h', '1d'}
+    global debug_mode
+    return client.get_market_data3(field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data, 'v2', enable_read_from_local, debug_mode)
+
+
+def get_market_data(
+    field_list = [], stock_list = [], period = '1d'
+    , start_time = '', end_time = '', count = -1
+    , dividend_type = 'none', fill_data = True
+):
     '''
     获取历史行情数据
     :param field_list: 行情数据字段列表，[]为全部字段
@@ -250,28 +367,35 @@ def get_market_data(field_list=[], stock_list=[], period='1d', start_time='', en
             field1, field2, ... : 数据字段
             value1, value2, ... : pd.DataFrame 字段对应的数据，各字段维度相同，index为stock_list，columns为time_list
     '''
-    return getMarketData(field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data)
-
-
-@try_except
-def getMarketData(field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data):
-    client = get_client()
-    if period in {'tick'}:
-        return client.get_market_data2(field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data)
-    if period in {'1m', '5m', '1d'}:
+    if period in {'1m', '5m', '15m', '30m', '1h', '1d'}:
         import pandas as pd
-        index, data = client.get_market_data2(field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data)
+        index, data = get_market_data_ori(field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data)
         result = {}
         for field in data:
             result[field] = pd.DataFrame(data[field], index = index[0], columns = index[1])
         return result
-    return None
+
+    return get_market_data_ori(field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data)
 
 
-def get_local_data(field_list=[], stock_code=[], period='1d', start_time='', end_time='', count=-1,
-                              dividend_type='none', fill_data=True, data_dir=data_dir):
+def get_market_data_ex_ori(
+    field_list = [], stock_list = [], period = '1d'
+    , start_time = '', end_time = '', count = -1
+    , dividend_type = 'none', fill_data = True
+):
+    client = get_client()
+    enable_read_from_local = period in {'1m', '5m', '15m', '30m', '1h', '1d'}
+    global debug_mode
+    return client.get_market_data3(field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data, 'v3', enable_read_from_local, debug_mode)
+
+
+def get_market_data_ex(
+    field_list = [], stock_list = [], period = '1d'
+    , start_time = '', end_time = '', count = -1
+    , dividend_type = 'none', fill_data = True
+):
     '''
-    从本地数据缓存读取行情数据
+    获取历史行情数据
     :param field_list: 行情数据字段列表，[]为全部字段
         K线可选字段：
             "time"                #时间戳
@@ -300,13 +424,12 @@ def get_local_data(field_list=[], stock_code=[], period='1d', start_time='', end
             "bidPrice1", "bidPrice2", "bidPrice3", "bidPrice4", "bidPrice5" #买一价~买五价
             "askVol1", "askVol2", "askVol3", "askVol4", "askVol5"           #卖一量~卖五量
             "bidVol1", "bidVol2", "bidVol3", "bidVol4", "bidVol5"           #买一量~买五量
-    :param stock_code: 股票代码列表，例如：["000001.SZ", "600000.SH"]
+    :param stock_list: 股票代码 "000001.SZ"
     :param period: 周期 分笔"tick" 分钟线"1m"/"5m" 日线"1d"
-    :param start_time: 开始时间，格式YYYYMMDD/YYYYMMDDhhmmss/YYYYMMDDhhmmss.milli，例如："20200427" "20200427093000" "20200427093000.000"
-    :param end_time: 结束时间 格式同上
-    :param count: 数量 -1全部，n: 从结束时间向前数n个
+    :param start_time: 起始时间 "20200101" "20200101093000"
+    :param end_time: 结束时间 "20201231" "20201231150000"
+    :param count: 数量 -1全部/n: 从结束时间向前数n个
     :param dividend_type: 除权类型"none" "front" "back" "front_ratio" "back_ratio"
-    :param data_dir: 本地数据缓存路径
     :param fill_data: 对齐时间戳时是否填充数据，仅对K线有效，分笔周期不对齐时间戳
         为True时，以缺失数据的前一条数据填充
             open、high、low、close 为前一条数据的close
@@ -321,16 +444,98 @@ def get_local_data(field_list=[], stock_code=[], period='1d', start_time='', end
             field1, field2, ... : 数据字段
             value1, value2, ... : pd.DataFrame 字段对应的数据，各字段维度相同，index为stock_list，columns为time_list
     '''
-    if period in {'tick'}:
-        return getLocalTickDataBatch(data_dir, '000001.SH', field_list, stock_code, period, start_time, end_time, count)
-    if period in {'1m', '5m', '1d'}:
+
+    if period in {'1m', '5m', '15m', '30m', '1h', '1d'}:
+        ifield = 'time'
+        query_field_list = field_list if (not field_list) or (ifield in field_list) else [ifield] + field_list
+        ori_data = _get_market_data_ex_ori_221207(query_field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data)
+
         import pandas as pd
-        index, data = getLocalDataFieldList(data_dir, '000001.SH', field_list, stock_code, period, start_time, end_time, count,
-                                            dividend_type)
         result = {}
-        for field in data:
-            result[field] = pd.DataFrame(data[field], index = index[0], columns = index[1])
+
+        if not ori_data:
+            return result
+        stime_fmt = '%Y%m%d' if period == '1d' else '%Y%m%d%H%M%S'
+        for s, data in ori_data.items():
+            cols = field_list if field_list else list(data.dtype.names)
+            sdata = pd.DataFrame(data, columns = cols)
+            sdata.index = [timetag_to_datetime(t, stime_fmt) for t in data['time']]
+            result[s] = sdata
+
         return result
+
+    import pandas as pd
+    result = {}
+
+    ifield = 'time'
+    query_field_list = field_list if (not field_list) or (ifield in field_list) else [ifield] + field_list
+    ori_data = get_market_data_ex_ori(query_field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data)
+
+    fl = field_list
+    stime_fmt = '%Y%m%d' if period == '1d' else '%Y%m%d%H%M%S'
+    if fl:
+        fl2 = fl if ifield in fl else [ifield] + fl
+        for s in ori_data:
+            sdata = pd.DataFrame(ori_data[s], columns = fl2)
+            sdata2 = sdata[fl]
+            sdata2.index = sdata[ifield]
+            sdata2.index.name = 'stime'
+            result[s] = sdata2
+    else:
+        for s in ori_data:
+            sdata = pd.DataFrame(ori_data[s])
+            sdata.index = [timetag_to_datetime(t, stime_fmt) for t in sdata[ifield]]
+            sdata.index.name = 'stime'
+            result[s] = sdata
+
+    return result
+
+
+def _get_market_data_ex_ori_221207(
+    field_list = [], stock_list = [], period = '1d'
+    , start_time = '', end_time = '', count = -1
+    , dividend_type = 'none', fill_data = True
+):
+    client = get_client()
+    enable_read_from_local = period in {'1m', '5m', '15m', '30m', '1h', '1d'}
+    global debug_mode
+
+    fi, sdl = client.get_market_data3(field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data, 'v4', enable_read_from_local, debug_mode)
+
+    import numpy as np
+    return {s: np.frombuffer(b, fi) for s, b in sdl}
+
+
+def _get_market_data_ex_221207(
+    field_list = [], stock_list = [], period = '1d'
+    , start_time = '', end_time = '', count = -1
+    , dividend_type = 'none', fill_data = True
+):
+    ifield = 'time'
+    query_field_list = field_list if (not field_list) or (ifield in field_list) else [ifield] + field_list
+
+    if period in {'1m', '5m', '15m', '30m', '1h', '1d'}:
+        ori_data = _get_market_data_ex_ori_221207(query_field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data)
+    else:
+        ori_data = get_market_data_ex_ori(query_field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data)
+
+    import pandas as pd
+    result = {}
+
+    for s, data in ori_data.items():
+        cols = field_list if field_list else list(data.dtype.names)
+        sdata = pd.DataFrame(data, columns = cols)
+        sdata.index = pd.to_datetime((data['time'] + 28800000) * 1000000)
+        result[s] = sdata
+
+    return result
+
+
+get_market_data3 = _get_market_data_ex_221207
+
+
+def get_local_data(field_list=[], stock_code=[], period='1d', start_time='', end_time='', count=-1,
+                              dividend_type='none', fill_data=True, data_dir=data_dir):
     return None
 
 
@@ -339,7 +544,7 @@ def get_l2_quote(field_list=[], stock_code='', start_time='', end_time='', count
     level2实时行情
     '''
     client = get_client()
-    datas = client.get_market_data2(field_list, [stock_code], 'l2quote', start_time, end_time, count, 'none', False)
+    datas = client.get_market_data3(field_list, [stock_code], 'l2quote', start_time, end_time, count, 'none', False, '', False, False)
     if datas:
         return datas[stock_code]
     return None
@@ -350,7 +555,7 @@ def get_l2_order(field_list=[], stock_code='', start_time='', end_time='', count
     level2逐笔委托
     '''
     client = get_client()
-    datas = client.get_market_data2(field_list, [stock_code], 'l2order', start_time, end_time, count, 'none', False)
+    datas = client.get_market_data3(field_list, [stock_code], 'l2order', start_time, end_time, count, 'none', False, '', False, False)
     if datas:
         return datas[stock_code]
     return None
@@ -361,7 +566,7 @@ def get_l2_transaction(field_list=[], stock_code='', start_time='', end_time='',
     level2逐笔成交
     '''
     client = get_client()
-    datas = client.get_market_data2(field_list, [stock_code], 'l2transaction', start_time, end_time, count, 'none', False)
+    datas = client.get_market_data3(field_list, [stock_code], 'l2transaction', start_time, end_time, count, 'none', False, '', False, False)
     if datas:
         return datas[stock_code]
     return None
@@ -403,6 +608,11 @@ def get_main_contract(code_market):
     client = get_client()
     return client.get_main_contract(code_market)
 
+def datetime_to_timetag(datetime, format = "%Y%m%d%H%M%S"):
+    if len(datetime) == 8:
+        format = "%Y%m%d"
+    timetag = time.mktime(time.strptime(datetime, format))
+    return timetag * 1000
 
 def timetag_to_datetime(timetag, format):
     '''
@@ -452,6 +662,8 @@ def subscribe_callback_wrapper(callback):
     import traceback
     def subscribe_callback(datas):
         try:
+            if type(datas) == bytes:
+                datas = bson.BSON.decode(datas)
             callback(datas)
         except:
             print('subscribe_quote callback error:', callback)
@@ -475,14 +687,26 @@ def subscribe_quote(stock_code, period='1d', start_time='', end_time='', count=0
     '''
     if callback:
         callback = subscribe_callback_wrapper(callback)
-    return subscribeQuote({'stockCode': stock_code, 'period': period}, {'startTime': start_time, 'endTime': end_time},
-                          count, callback)
 
+    meta = {'stockCode': stock_code, 'period': period}
+    region = {'startTime': start_time, 'endTime': end_time, 'count': count}
 
-@try_except
-def subscribeQuote(meta, region, count, callback):
     client = get_client()
-    return client.subscribe_quote(meta, region, count, callback)
+    return client.subscribe_quote(bson.BSON.encode(meta), bson.BSON.encode(region), callback)
+
+
+def subscribe_l2thousand(stock_code, gear_num = 0, callback = None):
+    '''
+    订阅千档盘口
+    '''
+    if callback:
+        callback = subscribe_callback_wrapper(callback)
+
+    meta = {'stockCode': stock_code, 'period': 'l2thousand'}
+    region = {'thousandGearNum': gear_num, 'thousandDetailGear': 0, 'thousandDetailNum': 0}
+
+    client = get_client()
+    return client.subscribe_quote(bson.BSON.encode(meta), bson.BSON.encode(region), callback)
 
 
 def subscribe_whole_quote(code_list, callback=None):
@@ -496,11 +720,7 @@ def subscribe_whole_quote(code_list, callback=None):
     '''
     if callback:
         callback = subscribe_callback_wrapper(callback)
-    return subscribeWholeQuote(code_list, callback)
 
-
-@try_except
-def subscribeWholeQuote(code_list, callback):
     client = get_client()
     return client.subscribe_whole_quote(code_list, callback)
 
@@ -560,7 +780,7 @@ def get_instrument_detail(stock_code):
     :param stock_code: 股票代码 e.g. "600000.SH"
     :return: dict
         ExchangeID(str):合约市场代码, InstrumentID(str):合约代码, InstrumentName(str):合约名称, ProductID(str):合约的品种ID(期货), ProductName(str)合约的品种名称(期货),
-        CreateDate(int):上市日期(期货), OpenDate(int):IPO日期(股票), ExpireDate(int):退市日或者到期日, PreClose(double):前收盘价格, SettlementPrice(double):前结算价格, 
+        CreateDate(int):上市日期(期货), OpenDate(int):IPO日期(股票), ExpireDate(int):退市日或者到期日, PreClose(double):前收盘价格, SettlementPrice(double):前结算价格,
         UpStopPrice(double):当日涨停价, DownStopPrice(double):当日跌停价, FloatVolume(double):流通股本, TotalVolume(double):总股本, LongMarginRatio(double):多头保证金率,
         ShortMarginRatio(double):空头保证金率, PriceTick(double):最小变价单位, VolumeMultiple(int):合约乘数(对期货以外的品种，默认是1),
         MainContract(int):主力合约标记，1、2、3分别表示第一主力合约，第二主力合约，第三主力合约, LastVolume(int):昨日持仓量, InstrumentStatus(int):合约停牌状态,
@@ -598,6 +818,22 @@ def get_instrument_detail(stock_code):
     ret = {}
     for field in field_list:
         ret[field] = inst.get(field)
+
+    exfield_list = [
+            'ProductTradeQuota'
+            , 'ContractTradeQuota'
+            , 'ProductOpenInterestQuota'
+            , 'ContractOpenInterestQuota'
+        ]
+    inst_ex = inst.get('ExtendInfo', {})
+    for field in exfield_list:
+        ret[field] = inst_ex.get(field)
+
+    def convNum2Str(field):
+        if field in ret and isinstance(ret[field], int):
+            ret[field] = str(ret[field])
+    convNum2Str('CreateDate')
+    convNum2Str('OpenDate')
     return ret
 
 
@@ -606,8 +842,8 @@ def get_etf_info(stockCode):
     获取etf申赎清单
     :param stockCode: ETF代码 e.g. "159811.SZ"
     :return: dict
-        etfCode(str):ETF代码, etfExchID(str):ETF市场, prCode(str):基金申赎代码, 
-        stocks(dict):成分股 
+        etfCode(str):ETF代码, etfExchID(str):ETF市场, prCode(str):基金申赎代码,
+        stocks(dict):成分股
             key: 成分股代码 e.g. "000063.SZ"
             value: dict
                 componentExchID(str):成份股市场代码, componentCode(str):成份股代码, componentName(str):成份股名称, componentVolume(int):成份股数量
@@ -789,17 +1025,17 @@ def download_history_data(stock_code, period, start_time='', end_time=''):
 supply_history_data = download_history_data
 
 
-def download_financial_data(stock_list, table_list=[]):
+def download_history_data2(stock_list, period, start_time='', end_time='', callback=None):
     '''
-    :param stock_list: 股票代码列表
-    :param table_list: 财务数据表名列表，[]为全部表
-        可选范围：['Balance','Income','CashFlow','PreshareIndex','Capital','Top10FlowHolder','Top10Holder','HolderNum']
+    :param stock_code: 股票代码 e.g. "000001.SZ"
+    :param period: 周期 分笔"tick" 分钟线"1m"/"5m" 日线"1d"
+    :param start_time: 开始时间，格式YYYYMMDD/YYYYMMDDhhmmss/YYYYMMDDhhmmss.milli，e.g."20200427" "20200427093000" "20200427093000.000"
+        若取某日全量历史数据，时间需要具体到秒，e.g."20200427093000"
+    :param end_time: 结束时间 同上，若是未来某时刻会被视作当前时间
+    :return: bool 是否成功
     '''
     client = get_client()
-    if not table_list:
-        table_list = ['Balance','Income','CashFlow','PreshareIndex','Capital','Top10FlowHolder','Top10Holder','HolderNum']
-    table_list = [table.upper() for table in table_list]
-    
+
     status = [False, 0, 1, '']
     def on_progress(data):
         try:
@@ -809,21 +1045,81 @@ def download_financial_data(stock_list, table_list=[]):
             status[0] = done
             status[1] = finished
             status[2] = total
+
+            try:
+                callback(data)
+            except:
+                pass
+
             return done
         except:
             status[0] = True
             status[3] = 'exception'
             return True
-    
-    client.supply_finance_data(stock_list, table_list, on_progress)
-    
+
+    client.supply_history_data2(stock_list, period, start_time, end_time, on_progress)
+
     import time
-    while not status[0]:
-        time.sleep(0.1)
-        if not client.is_connected():
-            raise Exception('行情服务连接断开')
-            break
+    try:
+        while not status[0] and client.is_connected():
+            time.sleep(0.1)
+    except:
+        if status[1] < status[2]:
+            client.stop_supply_history_data2()
+        traceback.print_exc()
+    if not client.is_connected():
+        raise Exception('行情服务连接断开')
+    if status[3]:
+        raise Exception('下载数据失败：' + status[3])
     return
+
+
+def download_financial_data(stock_list, table_list=[], start_time='', end_time=''):
+    '''
+    :param stock_list: 股票代码列表
+    :param table_list: 财务数据表名列表，[]为全部表
+        可选范围：['Balance','Income','CashFlow','Capital','Top10FlowHolder','Top10Holder','HolderNum','PershareIndex', 'PerShare']
+    :param start_time: 开始时间，格式YYYYMMDD，e.g."20200427"
+    :param end_time: 结束时间 同上，若是未来某时刻会被视作当前时间
+    '''
+    client = get_client()
+    if not table_list:
+        table_list = ['Balance','Income','CashFlow','Capital','Top10FlowHolder','Top10Holder','HolderNum','PershareIndex', 'PerShare']
+
+    for stock_code in stock_list:
+        for table in table_list:
+            client.supply_history_data(stock_code, table, start_time, end_time)
+
+
+def download_financial_data2(stock_list, table_list=[], start_time='', end_time='', callback=None):
+    '''
+    :param stock_list: 股票代码列表
+    :param table_list: 财务数据表名列表，[]为全部表
+        可选范围：['Balance','Income','CashFlow','Capital','Top10FlowHolder','Top10Holder','HolderNum','PershareIndex', 'PerShare']
+    :param start_time: 开始时间，格式YYYYMMDD，e.g."20200427"
+    :param end_time: 结束时间 同上，若是未来某时刻会被视作当前时间
+    '''
+    client = get_client()
+    if not table_list:
+        table_list = ['Balance','Income','CashFlow','Capital','Top10FlowHolder','Top10Holder','HolderNum','PershareIndex', 'PerShare']
+
+    data = {}
+    data['total'] = len(table_list) * len(stock_list)
+    finish = 0
+    for stock_code in stock_list:
+        for table in table_list:
+            client.supply_history_data(stock_code, table, start_time, end_time)
+
+            finish = finish + 1
+            try:
+                data['finished'] = finish
+                callback(data)
+            except:
+                pass
+
+            if not client.is_connected():
+                raise Exception('行情服务连接断开')
+                break
 
 
 def get_instrument_type(stock_code):
@@ -844,3 +1140,169 @@ def download_sector_data():
     '''
     client = get_client()
     client.down_all_sector_data()
+
+def get_holidays():
+    '''
+    获取节假日列表
+    :return: 8位int型日期
+    '''
+    client = get_client()
+    return [str(d) for d in client.get_holidays()]
+
+def get_trading_calendar(market, start_time = '', end_time = '', tradetimes = False):
+    '''
+    获取指定市场交易日历
+    :param market: str 市场
+    :param start_time: str 起始时间 '20200101'
+    :param end_time: str 结束时间 '20201231'
+    :param tradetimes: bool 是否包含日内交易时段
+    :return:
+    '''
+    holidays_list = get_holidays()   # 19900101格式的数字
+    import datetime
+    now = datetime.datetime.combine(datetime.date.today(), datetime.time())
+    last = datetime.datetime(now.year + 1, 1, 1)
+
+    client = get_client()
+    trading_list = list(client.get_trading_dates_by_market(market, start_time, end_time, -1).keys())
+
+    if start_time == '' and trading_list:
+        start_time = trading_list[0]
+    start = datetime.datetime.strptime(start_time, "%Y%m%d")
+
+    if end_time == '':
+        end_time = now.strftime("%Y%m%d")
+    end = min(datetime.datetime.strptime(end_time, "%Y%m%d"), last)
+
+       # 时间戳毫秒
+    if not trading_list:
+        return []
+
+    if not tradetimes:
+        ret_list = trading_list
+        while now < end:
+            now += datetime.timedelta(days=1)
+            if datetime.datetime.isoweekday(now) not in [6, 7]:
+                ft = (now.strftime("%Y%m%d"))
+                if ft not in holidays_list:
+                    ret_list.append(ft)
+        return ret_list
+    else:
+        ret_map = {}
+        trading_times = get_trade_times(market)
+        new_trading_times_prev = []  #21-24
+        new_trading_times_mid = []  #0-3
+        new_trading_times_next = [] #9-15
+
+        for tt in trading_times:
+            t0 = tt[0]
+            t1 = tt[1]
+            t2 = tt[2]
+            try:
+                if t1 <= 0:
+                    new_trading_times_prev.append([t0 + 86400, t1 + 86400, t2])
+                elif 0 <= t0 and t1 <= 10800:
+                    new_trading_times_mid.append(tt)
+                elif t0 <= 0 and t1 <= 10800:
+                    new_trading_times_prev.append([t0 + 86400, 86400, t2])
+                    new_trading_times_mid.append([0, t1, t2])
+                else:
+                    new_trading_times_next.append(tt)
+            except:
+                pass
+
+        end = end + datetime.timedelta(days=1)
+        import copy
+        prev_open_flag = False
+        while start < end:
+            weekday = datetime.datetime.isoweekday(start)
+            ft = start.strftime("%Y%m%d")
+            if weekday not in [6, 7]:
+                if ft not in holidays_list:
+                    ret_map[ft] = []
+                    if prev_open_flag:
+                        ret_map[ft].extend(new_trading_times_mid)  # 早盘
+                    ret_map[ft].extend(new_trading_times_next)
+                    if weekday != 5:
+                        if (start + datetime.timedelta(days=1)).strftime("%Y%m%d") not in holidays_list:
+                            ret_map[ft].extend(new_trading_times_prev)
+                    else:
+                        if (start + datetime.timedelta(days=3)).strftime("%Y%m%d") not in holidays_list:
+                            ret_map[ft].extend(new_trading_times_prev)
+                    prev_open_flag = True
+                else:
+                    prev_open_flag = False
+            start += datetime.timedelta(days=1)
+        return ret_map
+
+def get_trade_times(stockcode):
+    '''
+    返回指定市场或者指定股票的交易时段
+    :param stockcode:  市场或者代码.市场  例如 'SH' 或者 '600000.SH'
+    :return: 返回交易时段列表，第一位是开始时间，第二位结束时间，第三位交易类型   （2 - 开盘竞价， 3 - 连续交易， 8 - 收盘竞价， 9 - 盘后定价）
+    '''
+    stockcode_split = stockcode.split('.')
+    if len(stockcode_split) == 2:
+        ins_dl = get_instrument_detail(stockcode)
+        product = ins_dl['ProductID']
+        stock = stockcode_split[0]
+        market = stockcode_split[1]
+        default = 0
+    else:
+        market = stockcode
+        product = ""
+        stock = ""
+        default = 1
+
+    trader_time = {}
+    try:
+        with open(os.path.join(data_dir, '..', 'config', 'tradetimeconfig2.json'), 'r') as f:
+            trader_time = json.loads(f.read())
+    except:
+        pass
+
+    ret = []
+    import re
+    for tdm in trader_time:
+        if tdm['default'] == default and tdm['market'] == market:
+            if tdm['product'] == [] and tdm['type'] == "":
+                ret = tdm['tradetime'] #默认为product为空的 默认值
+            if tdm['type'] != "" and re.match(tdm['type'], stock):
+                ret = tdm['tradetime']
+                break
+            if product != "" and product in tdm['product']:
+                ret = tdm['tradetime']
+                break
+
+    import datetime
+    def convert(t):
+        if t == "240000" or t == "-240000":
+            return 0
+        if t[0] == '-':
+            parc = datetime.datetime.strptime(t, "-%H%M%S")
+            t = datetime.timedelta(hours=-parc.hour, minutes=-parc.minute)
+        else:
+            parc = datetime.datetime.strptime(t, "%H%M%S")
+            t = datetime.timedelta(hours=parc.hour, minutes=parc.minute)
+        return int(t.total_seconds())
+    ret = [[convert(timepair[0]), convert(timepair[1]), int(timepair[2])] for timepair in ret]
+    return ret
+
+def is_stock_type(stock, tag):
+    client = get_client()
+    return client.is_stock_type(stock, tag)
+
+def download_cb_data():
+    client = get_client()
+    return client.down_cb_data()
+    
+def get_cb_info(stockcode):
+    client = get_client()
+    return client.get_cb_info(stockcode)
+    
+gmd = get_market_data
+gmd2 = get_market_data_ex
+gmd3 = get_market_data3
+gld = get_local_data
+t2d = timetag_to_datetime
+gsl = get_stock_list_in_sector

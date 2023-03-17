@@ -378,4 +378,4 @@ if __name__ == '__main__':
     app.config.REQUEST_TIMEOUT = 600000
     app.config.KEEP_ALIVE_TIMEOUT = 6000
     app.blueprint(api)
-    app.run(host='0.0.0.0', port=7800, workers=4, auto_reload=True, debug=False)
+    app.run(host='0.0.0.0', port=7800, workers=4, auto_reload=True, debug=True)

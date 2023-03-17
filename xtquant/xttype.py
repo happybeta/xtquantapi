@@ -28,6 +28,12 @@ class StockAccount(object):
             self.account_type = xtconstant.SECURITY_ACCOUNT
         elif(account_type == "CREDIT"):
             self.account_type = xtconstant.CREDIT_ACCOUNT
+        elif(account_type == "FUTURE"):
+            self.account_type = xtconstant.FUTURE_ACCOUNT
+        elif(account_type == "HUGANGTONG"):
+            self.account_type = xtconstant.HUGANGTONG_ACCOUNT
+        elif(account_type == "SHENGANGTONG"):
+            self.account_type = xtconstant.SHENGANGTONG_ACCOUNT
         else:
             self.account_type = xtconstant.SECURITY_ACCOUNT
         self.account_id = account_id
@@ -213,7 +219,7 @@ class XtOrderResponse(object):
     """
     迅投异步下单接口对应的委托反馈
     """
-    def __init__(self, account_id, order_id, strategy_name, order_remark, seq):
+    def __init__(self, account_id, order_id, strategy_name, order_remark, error_msg, seq):
         """
         :param account_id: 资金账号
         :param order_id: 订单编号
@@ -226,8 +232,31 @@ class XtOrderResponse(object):
         self.order_id = order_id
         self.strategy_name = strategy_name
         self.order_remark = order_remark
+        self.error_msg = error_msg
         self.seq = seq
 
+class XtAppointmentResponse(object):
+    """
+    迅投异步约券接口对应的委托反馈 
+    """
+    def __init__(self, account_id, order_id, error_id, error_msg, seq):
+        """
+        :param account_id: 资金账号
+        :param order_sysid: 订单编号
+        :param error_id: 错误编号
+        :param error_msg: 错误信息
+        :param seq: 下单请求序号
+        """
+        if error_id == 0:
+            self.order_sysid = error_msg
+            self.error_msg = ''
+        else:
+            self.order_sysid = str(order_id)
+            self.error_msg = error_msg
+        
+        self.account_id = account_id
+        self.error_id = error_id
+        self.seq = seq
 
 class XtCancelOrderResponse(object):
     """
@@ -316,3 +345,17 @@ class XtCreditDeal(object):
         self.traded_volume = traded_volume
         self.order_id = order_id
         self.contract_no = contract_no
+
+class XtAccountStatus(object):
+    """
+    迅投账号状态结构
+    """
+    def __init__(self, account_id, account_type, status):
+        """
+        :param account_id: 资金账号
+        :param account_type: 账号状态
+        :param status: 账号状态，详细见账号状态定义
+        """
+        self.account_type = account_type
+        self.account_id = account_id
+        self.status = status
