@@ -1,5 +1,7 @@
 # XtQuant
-迅投QMT接口相关介绍和常用功能封装，详细文章介绍请移步公众号
+迅投QMT, miniQMT接口相关介绍和常用功能封装. 
+项目fork from https://github.com/ai4trade/XtQuant 。
+支持了最新版本，做了一些优化。 
 
 ## 目录
 
@@ -50,5 +52,3 @@
 ---
 
 欢迎关注我的公众号“**量化实战**”，原创技术文章第一时间推送。
-
-![公众号](misc/qrcode.jpg)

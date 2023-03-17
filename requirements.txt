@@ -1,0 +1,8 @@
+pandas
+aiohttp
+akshare
+tqdm
+numpy
+sanic
+pandas_ta
+pandas_market_calendars
