@@ -12,6 +12,7 @@ from . import xtbson as bson
 from . import xtdata_config
 
 from .IPythonApiClient import IPythonApiClient as RPCClient
+# from .IPythonApiClient import get_local_tick_data_batch as getLocalTickDataBatch
 
 __all__ = [
     'subscribe_quote'
@@ -534,10 +535,82 @@ def _get_market_data_ex_221207(
 get_market_data3 = _get_market_data_ex_221207
 
 
-def get_local_data(field_list=[], stock_code=[], period='1d', start_time='', end_time='', count=-1,
-                              dividend_type='none', fill_data=True, data_dir=data_dir):
-    return None
+# def get_local_data(field_list=[], stock_code=[], period='1d', start_time='', end_time='', count=-1,
+#                               dividend_type='none', fill_data=True, data_dir=data_dir):
+#     return None
 
+
+def get_local_data(field_list=[],
+                   stock_code=[],
+                   period='1d',
+                   start_time='',
+                   end_time='',
+                   count=-1,
+                   dividend_type='none',
+                   fill_data=True,
+                   data_dir=data_dir):
+    '''
+    从本地数据缓存读取行情数据
+    :param field_list: 行情数据字段列表，[]为全部字段
+        K线可选字段：
+            "time"                #时间戳
+            "open"                #开盘价
+            "high"                #最高价
+            "low"                 #最低价
+            "close"               #收盘价
+            "volume"              #成交量
+            "amount"              #成交额
+            "settle"              #今结算
+            "openInterest"        #持仓量
+        分笔可选字段：
+            "time"                #时间戳
+            "lastPrice"           #最新价
+            "open"                #开盘价
+            "high"                #最高价
+            "low"                 #最低价
+            "lastClose"           #前收盘价
+            "amount"              #成交总额
+            "volume"              #成交总量
+            "pvolume"             #原始成交总量
+            "stockStatus"         #证券状态
+            "openInt"             #持仓量
+            "lastSettlementPrice" #前结算
+            "askPrice1", "askPrice2", "askPrice3", "askPrice4", "askPrice5" #卖一价~卖五价
+            "bidPrice1", "bidPrice2", "bidPrice3", "bidPrice4", "bidPrice5" #买一价~买五价
+            "askVol1", "askVol2", "askVol3", "askVol4", "askVol5"           #卖一量~卖五量
+            "bidVol1", "bidVol2", "bidVol3", "bidVol4", "bidVol5"           #买一量~买五量
+    :param stock_code: 股票代码列表，例如：["000001.SZ", "600000.SH"]
+    :param period: 周期 分笔"tick" 分钟线"1m"/"5m" 日线"1d"
+    :param start_time: 开始时间，格式YYYYMMDD/YYYYMMDDhhmmss/YYYYMMDDhhmmss.milli，例如："20200427" "20200427093000" "20200427093000.000"
+    :param end_time: 结束时间 格式同上
+    :param count: 数量 -1全部，n: 从结束时间向前数n个
+    :param dividend_type: 除权类型"none" "front" "back" "front_ratio" "back_ratio"
+    :param data_dir: 本地数据缓存路径
+    :param fill_data: 对齐时间戳时是否填充数据，仅对K线有效，分笔周期不对齐时间戳
+        为True时，以缺失数据的前一条数据填充
+            open、high、low、close 为前一条数据的close
+            amount、volume为0
+            settle、openInterest 和前一条数据相同
+        为False时，缺失数据所有字段填NaN
+    :return: 数据集，分笔数据和K线数据格式不同
+        period为'tick'时：{stock1 : value1, stock2 : value2, ...}
+            stock1, stock2, ... : 合约代码
+            value1, value2, ... : np.ndarray 数据列表，按time增序排列
+        period为其他K线周期时：{field1 : value1, field2 : value2, ...}
+            field1, field2, ... : 数据字段
+            value1, value2, ... : pd.DataFrame 字段对应的数据，各字段维度相同，index为stock_list，columns为time_list
+    '''
+    if period in {'tick'}:
+        return getLocalTickDataBatch(data_dir, '000001.SH', field_list, stock_code, period, start_time, end_time, count)
+    if period in {'1m', '5m', '1d'}:
+        import pandas as pd
+        index, data = getLocalDataFieldList(data_dir, '000001.SH', field_list, stock_code, period, start_time, end_time,
+                                            count, dividend_type)
+        result = {}
+        for field in data:
+            result[field] = pd.DataFrame(data[field], index=index[0], columns=index[1])
+        return result
+    return None
 
 def get_l2_quote(field_list=[], stock_code='', start_time='', end_time='', count=-1):
     '''
@@ -1174,7 +1247,7 @@ def get_trading_calendar(market, start_time = '', end_time = '', tradetimes = Fa
         end_time = now.strftime("%Y%m%d")
     end = min(datetime.datetime.strptime(end_time, "%Y%m%d"), last)
 
-       # 时间戳毫秒
+    # 时间戳毫秒
     if not trading_list:
         return []
 
@@ -1295,11 +1368,11 @@ def is_stock_type(stock, tag):
 def download_cb_data():
     client = get_client()
     return client.down_cb_data()
-    
+
 def get_cb_info(stockcode):
     client = get_client()
     return client.get_cb_info(stockcode)
-    
+
 gmd = get_market_data
 gmd2 = get_market_data_ex
 gmd3 = get_market_data3

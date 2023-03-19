@@ -1,17 +1,12 @@
 # -*- coding: utf-8 -*-
-
 from xtquant import xtdata
 import aiohttp, datetime, os, math
 import akshare as ak
 from tqdm import tqdm
 import pandas as pd
-# from sanic import Sanic, Blueprint, response
-
 from fastapi import FastAPI
 
 api = FastAPI()
-# api = Blueprint('xtdata', url_prefix='/quote/xtdata')
-# api = Sanic("xtdata")
 
 
 @api.listener('before_server_start')
@@ -159,7 +154,6 @@ def get_sector_list():
     sector_2 = xtdata.get_stock_list_in_sector('板块指数')
     sector_2 = [(i, xtdata.get_instrument_detail(i)['InstrumentName'], '证监会二级行业') for i in sector_2 if i.startswith('23')]
 
-
     index_code = [('000001.SH', '上证指数', '大盘指数'), ('399001.SZ', '深证成指', '大盘指数'), ('399006.SZ', '创业板指', '大盘指数'), ('000688.SH', '科创50', '大盘指数'), ('000300.SH', '沪深300', '大盘指数'), ('000016.SH', '上证50', '大盘指数'), ('000905.SH', '中证500', '大盘指数'), ('000852.SH', '中证1000', '大盘指数')]
 
     code_list = {i[0]: i[1:] for i in sector_1 + sector_2 + index_code}
@@ -173,10 +167,8 @@ def get_local_kline_data(code='230130.BKZS', start_time='20200101', period='1d',
 
     if len(df) < 1:
         return df
-
     # 时间转换
     df['trade_day'] = df['time'].apply(lambda x: datetime.datetime.fromtimestamp(x / 1000.0).date())
-
     # 重新选择列
     df['code'] = code
     df['sector_name'] = df['code'].apply(lambda x: code_list[x][0])
@@ -192,7 +184,7 @@ def store_history_bond_tick(init=1):
         pass
 
 
-@api.route('/sync/bond/tick', methods=['GET'])
+@get('/sync/bond/tick')
 async def sync_bond_tick(request):
     stock_code_list, bond_code_list = get_bond_spot()
     # 数据下载目录
@@ -218,7 +210,7 @@ async def sync_bond_tick(request):
 
     return response.json({"status": 0}, ensure_ascii=False)
 
-@api.route('/sync/stock/kline', methods=['GET'])
+@get('/sync/stock/kline')
 async def sync_stock_kline(request):
     code_list = get_shse_a_list()
     start_time = request.args.get('start_time', "20220630160000")
